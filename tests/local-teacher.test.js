@@ -1,0 +1,12 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path'),http=require('node:http');
+const {createApp}=require('../server');
+function request(port,route,headers={},data={}){return new Promise((resolve,reject)=>{const payload=route==='health'?'':JSON.stringify(data);const req=http.request({hostname:'127.0.0.1',port,path:'/api/'+route,method:route==='health'?'GET':'POST',agent:false,headers:{'Content-Type':'application/json','Content-Length':Buffer.byteLength(payload),Host:'localhost:'+port,...headers}},res=>{let text='';res.on('data',c=>text+=c);res.on('end',()=>resolve({status:res.statusCode,data:JSON.parse(text)}));});req.on('error',reject);req.end(payload);});}
+test('教师本机免口令；远程主机、跨源、代理及禁用环境不能自动取得教师身份',async t=>{
+ const dataDir=fs.mkdtempSync(path.join(os.tmpdir(),'local-teacher-')),server=createApp({dataDir,teacherKey:'remote-secret'});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));const port=server.address().port;
+ assert.equal((await request(port,'health')).data.localTeacher,true);
+ const local=await request(port,'teacher/local-login',{Origin:'http://localhost:'+port,'Sec-Fetch-Site':'same-origin'});assert.equal(local.status,200);assert(local.data.token);
+ const created=await request(port,'teacher/create',{Authorization:'Bearer '+local.data.token},{name:'免口令测试班'});assert.equal(created.status,200);assert.match(created.data.code,/^[A-F0-9]{6}$/);
+ for(const headers of [{Host:'school.example:'+port},{Origin:'https://unrelated.example'},{'Sec-Fetch-Site':'cross-site'},{Forwarded:'for=192.0.2.1'},{'X-Forwarded-For':'192.0.2.1'},{'X-Forwarded-Host':'school.example'},{'X-Real-IP':'192.0.2.1'},{Via:'1.1 proxy'}])assert.equal((await request(port,'teacher/local-login',headers)).status,403);
+ assert.equal((await request(port,'teacher/login',{},{})).status,401);assert.equal((await request(port,'teacher/login',{},{key:'remote-secret'})).status,200);
+ const locked=createApp({dataDir:fs.mkdtempSync(path.join(os.tmpdir(),'locked-teacher-')),teacherKey:'remote-secret',allowLocalTeacher:false});await new Promise(r=>locked.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>locked.close(r)));assert.equal((await request(locked.address().port,'health')).data.localTeacher,false);assert.equal((await request(locked.address().port,'teacher/local-login')).status,403);
+});

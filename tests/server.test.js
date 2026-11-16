@@ -1,0 +1,27 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {createApp}=require('../server'),KM=require('../public/engine');
+test('课堂隔离、授权、服务端核验、定格、恢复',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sleep-agent-test-'));const server=createApp({dataDir:dir,teacherKey:'test-key'});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));const base='http://127.0.0.1:'+server.address().port;
+ const api=async(p,data,token)=>{const r=await fetch(base+'/api/'+p,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:data===undefined?undefined:JSON.stringify(data)});return {status:r.status,data:await r.json()};};
+ assert.equal((await api('teacher')).status,401);assert.equal((await api('teacher/login',{key:'wrong'})).status,401);
+ const teacher=(await api('teacher/login',{key:'test-key'})).data.token;
+ const roomA=(await api('teacher/create',{name:'高一1班'},teacher)).data,roomB=(await api('teacher/create',{name:'高一2班'},teacher)).data;
+ assert.equal((await api('join',{name:'甲',className:'高一2班',code:roomA.code})).status,400);
+ const a=(await api('join',{name:'甲',className:'高一1班',code:roomA.code})).data,b=(await api('join',{name:'乙',className:'高一2班',code:roomB.code})).data;
+ assert.equal((await api('teacher',undefined,a.token)).status,403);assert.equal((await api('teacher/unlock',{code:roomA.code,stage:3},a.token)).status,403);
+ let s=a.state;s.vote=0;s.completed[0]=true;assert.equal((await api('save',{state:s},a.token)).status,200);
+ assert.deepEqual((await api('me',undefined,a.token)).data.room.votes,[1,0,0]);assert.deepEqual((await api('me',undefined,b.token)).data.room.votes,[0,0,0]);
+ s.evidence.distance={passed:true,hints:0,attempts:[{answer:{value:'0',cluster:0},passed:true}]};assert.equal((await api('save',{state:s},a.token)).status,200);assert.equal((await api('me',undefined,a.token)).data.state.evidence.distance.passed,false);
+ s.completed[1]=true;assert.equal((await api('save',{state:s},a.token)).status,400);s.completed[1]=false;
+ s.initialCenters=KM.clone(KM.INITIAL);s.evidence.distance.attempts.push({answer:{value:'2',cluster:0}});s.evidence.mean.attempts.push({answer:{x:'8',y:'1.7'}});s.converged=true;s.step=5;s.completed[1]=true;s.stage=2;
+ for(const k of [2,3])s.experiments[k]={seed:100,result:{tampered:true}};s.reason='选择三类，因为睡眠较多的样本分出了运动较多和运动较少两组。';s.completed[2]=true;
+ assert.equal((await api('save',{state:s},a.token)).status,200);s=(await api('me',undefined,a.token)).data.state;assert.equal(s.evidence.distance.passed,true);assert.equal(s.experiments[3].result.centers.length,3);
+ s.names=['晨光型','充电型','月亮型'];s.named=true;s.selftest={sleep:8,move:45};s.selfRatings=Array(5).fill('基本做到');s.completed[3]=true;assert.equal((await api('save',{state:s},a.token)).status,200);
+ s=(await api('me',undefined,a.token)).data.state;assert.equal(s.selftest.result.labels.length,41);
+ const chat=await api('chat',{event:'selftest',question:''},a.token);assert.equal(chat.status,200);assert.equal(chat.data.source,'本地导学');
+ const r=s.experiments[3].result;const snapshot={k:3,names:s.names,centers:r.centers,labels:r.labels,reason:s.reason};assert.equal((await api('teacher/freeze',{code:roomA.code,snapshot},teacher)).status,200);
+ const atlas=await api('atlas?code='+roomA.code);assert.equal(atlas.status,200);assert.equal(atlas.data.snapshot.participantCount,1);assert.equal(JSON.stringify(atlas.data).includes('"甲"'),false);
+ assert.equal((await api('save',{state:s},a.token)).status,409);assert.equal((await api('atlas?code='+roomB.code)).status,404);
+ assert.equal((await fetch(base+'/../server.js')).status,404);assert.equal((await fetch(base+'/data/teacher-access.txt')).status,404);
+ const persisted=JSON.parse(fs.readFileSync(path.join(dir,'classroom.json'),'utf8'));assert.equal(Object.keys(persisted.students).length,2);assert.equal(JSON.stringify(persisted.sessions).includes(a.token),false);
+});

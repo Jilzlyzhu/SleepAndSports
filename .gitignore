@@ -1,0 +1,9 @@
+data/
+node_modules/
+.env
+.env.*
+ai-settings.json
+teacher-access.txt
+classroom.json
+artifacts/
+*.log

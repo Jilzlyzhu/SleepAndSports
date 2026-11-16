@@ -1,0 +1,8 @@
+{
+  "name": "sleep-kmeans-learning-agent",
+  "version": "1.2.0",
+  "private": true,
+  "description": "K-means 聚类——你是哪种作息星人？学习智能体",
+  "scripts": {"start":"node server.js", "test":"node --test tests/*.test.js", "build":"node scripts/build.js"},
+  "engines": {"node": ">=20"}
+}

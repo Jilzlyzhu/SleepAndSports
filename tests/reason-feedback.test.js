@@ -1,0 +1,20 @@
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),os=require('node:os'),path=require('node:path');
+const {createApp}=require('../server'),KM=require('../public/engine'),Tutor=require('../public/tutor');
+test('选k反馈根据已保存的真实实验分析，不采信请求伪造的数据，失败兜底且不改变完成规则',async t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'sleep-reason-')),calls=[];let failure=false;
+ const server=createApp({dataDir:dir,teacherKey:'reason-test',aiEnv:{LLM_BASE_URL:'https://api.deepseek.com',LLM_MODEL:'deepseek-flash',LLM_API_KEY:'test-only'},fetchImpl:async(url,options)=>{calls.push(JSON.parse(options.body));if(failure)return new Response('{}',{status:429});return new Response(JSON.stringify({choices:[{message:{content:'已有依据：你比较了两种分法。\n还可补充：请指明被拆开的样本。\n想一想：拆开后哪种作息差异更清楚？'}}]}));}});
+ await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>server.close(r)));const base='http://127.0.0.1:'+server.address().port;
+ const api=async(route,data,token)=>{const r=await fetch(base+'/api/'+route,{method:data===undefined?'GET':'POST',headers:{'Content-Type':'application/json',...(token?{Authorization:'Bearer '+token}:{})},body:data===undefined?undefined:JSON.stringify(data)});return {status:r.status,data:await r.json()};};
+ const teacher=(await api('teacher/login',{key:'reason-test'})).data.token,room=(await api('teacher/create',{name:'私密班级'},teacher)).data,joined=(await api('join',{name:'私密姓名',className:room.name,code:room.code})).data,s=joined.state;
+ assert.equal((await api('chat',{event:'reason'},teacher)).status,403);assert.equal((await api('chat',{event:'reason'})).status,401);
+ s.stage=2;s.k=4;s.experiments={2:{seed:100},4:{seed:103}};s.reason='我选择四类，因为两类合并了一些睡眠不同的样本，四类适合进一步比较这些作息差异。';s.completed[2]=true;s.messages=[{role:'user',text:'旧对话不应进入本次分析'}];
+ assert.equal((await api('save',{state:s},joined.token)).status,200);
+ const answer=await api('chat',{event:'reason',reasonKey:Tutor.reasonKey(s),context:{k:3,reason:'伪造的理由',experiments:{}}},joined.token);assert.equal(answer.status,200);assert.match(answer.data.text,/已有依据/);assert.match(answer.data.source,/AI 学习助教/);
+ const messages=calls[0].messages;assert.equal(messages.length,2);assert.equal(messages[0].content,Tutor.REASON_SYSTEM);const context=JSON.parse(messages[1].content);assert.equal(context.selectedK,4);assert.equal(context.reason,s.reason);assert.deepEqual(context.experiments.map(e=>e.k),[2,4]);assert.deepEqual(context.points[0],{id:1,point:KM.DATA[0]});
+ for(const record of context.experiments){const expected=KM.canonical(KM.run(KM.DATA,record.k,{seed:s.experiments[record.k].seed}));assert.deepEqual(record.clusters.flatMap(c=>c.members).sort((a,b)=>a-b),Array.from({length:40},(_,i)=>i+1));record.clusters.forEach((c,i)=>{assert.equal(c.count,expected.labels.filter(l=>l===i).length);assert.deepEqual(c.center,expected.centers[i].map(v=>Math.round(v*100)/100));});}
+ assert(!JSON.stringify(messages).includes('私密'));assert(!JSON.stringify(messages).includes('旧对话'));assert(!JSON.stringify(messages).includes('伪造的理由'));assert.match(messages[0].content,/不评分或判定通过/);assert.match(messages[0].content,/k=3不是标准答案/);
+ const before=(await api('me',undefined,joined.token)).data.state;assert.equal(before.completed[2],true);assert.equal(before.reason,s.reason);assert.equal((await api('chat',{event:'reason',reasonKey:'outdated'},joined.token)).status,409);assert.equal(calls.length,1);
+ failure=true;const fallback=await api('chat',{event:'reason',reasonKey:Tutor.reasonKey(s)},joined.token);assert.match(fallback.data.source,/本地导学/);assert.match(fallback.data.text,/未进行在线模型分析/);assert.deepEqual((await api('me',undefined,joined.token)).data.state,before);
+ const review={key:Tutor.reasonKey(s),text:answer.data.text,source:answer.data.source};s.reasonReview=review;assert.equal((await api('save',{state:s},joined.token)).status,200);assert.equal((await api('me',undefined,joined.token)).data.state.reasonReview.text,answer.data.text);
+ s.reason+='我还需要进一步观察边界样本。';await api('save',{state:s},joined.token);assert.equal((await api('me',undefined,joined.token)).data.state.reasonReview,undefined);
+});
